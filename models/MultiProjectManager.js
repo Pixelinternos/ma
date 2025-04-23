@@ -1,105 +1,126 @@
 /**
  * MultiProjectManager.js
- * Manages multiple projects with tabbed interface and batch operations
+ * Manages multiple projects with tabbed interface
  */
 
 const fs = require('fs-extra');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 const logger = require('../utils/logger');
-const ProjectManager = require('../framework/ProjectManager');
 
 class MultiProjectManager {
+  /**
+   * Initialize the MultiProjectManager
+   * @param {Object} config - Configuration options
+   */
   constructor(config = {}) {
+    this.config = config;
+    this.projectsDir = path.join(process.cwd(), 'projects');
     this.configDir = path.join(process.cwd(), 'config');
-    this.projectsConfigPath = path.join(this.configDir, 'multi_projects.json');
     
-    // Ensure config directory exists
+    // Ensure directories exist
+    fs.ensureDirSync(this.projectsDir);
     fs.ensureDirSync(this.configDir);
     
-    this.config = config;
-    this.projectManager = new ProjectManager(config);
+    // Initialize project tabs
     this.projectTabs = [];
-    this.activeTabIndex = 0;
     
+    // Load project tabs
     this.loadProjectTabs();
+    
+    logger.info('MultiProjectManager initialized');
   }
   
   /**
-   * Load saved project tabs configuration
+   * Load project tabs from configuration
    */
   loadProjectTabs() {
     try {
-      if (fs.existsSync(this.projectsConfigPath)) {
-        const data = fs.readJsonSync(this.projectsConfigPath);
-        this.projectTabs = data.tabs || [];
-        this.activeTabIndex = data.activeTabIndex || 0;
+      const tabsPath = path.join(this.configDir, 'project-tabs.json');
+      
+      if (fs.existsSync(tabsPath)) {
+        this.projectTabs = fs.readJsonSync(tabsPath);
         logger.info(`Loaded ${this.projectTabs.length} project tabs`);
       } else {
-        logger.info('No project tabs configuration found, creating new one');
+        this.projectTabs = [];
         this.saveProjectTabs();
+        logger.info('Created empty project tabs file');
       }
     } catch (error) {
       logger.error(`Failed to load project tabs: ${error.message}`);
       this.projectTabs = [];
-      this.activeTabIndex = 0;
     }
   }
   
   /**
-   * Save project tabs configuration
+   * Save project tabs to configuration
    */
   saveProjectTabs() {
     try {
-      fs.writeJsonSync(this.projectsConfigPath, {
-        tabs: this.projectTabs,
-        activeTabIndex: this.activeTabIndex,
-        updatedAt: new Date().toISOString()
-      }, { spaces: 2 });
-      logger.info(`Saved ${this.projectTabs.length} project tabs`);
-      return true;
+      const tabsPath = path.join(this.configDir, 'project-tabs.json');
+      fs.writeJsonSync(tabsPath, this.projectTabs, { spaces: 2 });
     } catch (error) {
       logger.error(`Failed to save project tabs: ${error.message}`);
-      return false;
     }
   }
   
   /**
-   * Add a new project tab
-   * @param {Object} projectData - Project data including repository URL
-   * @returns {Object} New tab data
+   * Add a project tab
+   * @param {Object} projectTab - Project tab data
+   * @returns {Promise<Object>} Added project tab
    */
-  async addProjectTab(projectData) {
+  async addProjectTab(projectTab) {
     try {
-      // Create a unique ID for the tab
-      const tabId = uuidv4();
+      if (!projectTab.projectName) {
+        throw new Error('Project name is required');
+      }
       
-      // Add the project using the ProjectManager
-      const project = await this.projectManager.addProject(projectData.repoUrl);
+      // Check if project already exists
+      const existingTab = this.projectTabs.find(tab => tab.projectName === projectTab.projectName);
       
-      // Create the tab object
-      const tab = {
-        id: tabId,
-        projectName: project.config.name,
-        projectId: project.config.name, // Use name as ID for simplicity
-        repoUrl: projectData.repoUrl,
-        workflowId: projectData.workflowId || null,
-        isInitialized: false, // Default to not initialized
+      if (existingTab) {
+        return existingTab;
+      }
+      
+      // Create project directory if it doesn't exist
+      const projectPath = path.join(this.projectsDir, projectTab.projectName);
+      
+      if (!fs.existsSync(projectPath)) {
+        fs.mkdirSync(projectPath, { recursive: true });
+      }
+      
+      // Clone repository if provided
+      if (projectTab.repoUrl) {
+        if (fs.existsSync(path.join(projectPath, '.git'))) {
+          // Pull latest changes
+          await execAsync('git pull', { cwd: projectPath });
+        } else {
+          // Clone repository
+          await execAsync(`git clone ${projectTab.repoUrl} "${projectPath}"`);
+        }
+      }
+      
+      // Create project tab
+      const newTab = {
+        id: projectTab.id || uuidv4(),
+        projectName: projectTab.projectName,
+        repoUrl: projectTab.repoUrl || null,
+        isLocal: projectTab.isLocal !== undefined ? projectTab.isLocal : !projectTab.repoUrl,
+        isInitialized: projectTab.isInitialized || false,
+        status: projectTab.status || 'active',
         addedAt: new Date().toISOString(),
-        status: 'added'
+        updatedAt: new Date().toISOString()
       };
       
-      // Add to tabs array
-      this.projectTabs.push(tab);
-      
-      // Set as active tab
-      this.activeTabIndex = this.projectTabs.length - 1;
-      
-      // Save configuration
+      this.projectTabs.push(newTab);
       this.saveProjectTabs();
       
-      logger.info(`Added project tab: ${project.config.name}`);
-      return tab;
+      logger.info(`Project tab added: ${newTab.projectName} (${newTab.id})`);
+      
+      return newTab;
     } catch (error) {
       logger.error(`Failed to add project tab: ${error.message}`);
       throw error;
@@ -107,156 +128,105 @@ class MultiProjectManager {
   }
   
   /**
-   * Add multiple project tabs in batch
-   * @param {Array<Object>} projectsData - Array of project data objects
-   * @returns {Array<Object>} Added tabs
-   */
-  async addMultipleProjectTabs(projectsData) {
-    try {
-      const addedTabs = [];
-      
-      for (const projectData of projectsData) {
-        try {
-          const tab = await this.addProjectTab(projectData);
-          addedTabs.push(tab);
-        } catch (error) {
-          logger.error(`Failed to add project: ${projectData.repoUrl}`, error);
-          // Continue with other projects even if one fails
-        }
-      }
-      
-      logger.info(`Added ${addedTabs.length} of ${projectsData.length} project tabs`);
-      return addedTabs;
-    } catch (error) {
-      logger.error(`Batch project add failed: ${error.message}`);
-      throw error;
-    }
-  }
-  
-  /**
    * Remove a project tab
-   * @param {string} tabId - ID of tab to remove
+   * @param {string} tabId - Tab ID
    * @returns {boolean} Success status
    */
   removeProjectTab(tabId) {
-    try {
-      const tabIndex = this.projectTabs.findIndex(tab => tab.id === tabId);
-      if (tabIndex === -1) {
-        throw new Error(`Tab not found: ${tabId}`);
-      }
-      
-      // Remove tab
-      this.projectTabs.splice(tabIndex, 1);
-      
-      // Adjust active tab index if needed
-      if (this.activeTabIndex >= this.projectTabs.length) {
-        this.activeTabIndex = Math.max(0, this.projectTabs.length - 1);
-      }
-      
-      // Save configuration
-      this.saveProjectTabs();
-      
-      logger.info(`Removed project tab: ${tabId}`);
-      return true;
-    } catch (error) {
-      logger.error(`Failed to remove project tab: ${error.message}`);
+    const index = this.projectTabs.findIndex(tab => tab.id === tabId);
+    
+    if (index === -1) {
       return false;
     }
-  }
-  
-  /**
-   * Set the active project tab
-   * @param {string} tabId - ID of tab to activate
-   * @returns {boolean} Success status
-   */
-  setActiveTab(tabId) {
-    try {
-      const tabIndex = this.projectTabs.findIndex(tab => tab.id === tabId);
-      if (tabIndex === -1) {
-        throw new Error(`Tab not found: ${tabId}`);
-      }
-      
-      this.activeTabIndex = tabIndex;
-      this.saveProjectTabs();
-      
-      logger.info(`Set active tab: ${tabId}`);
-      return true;
-    } catch (error) {
-      logger.error(`Failed to set active tab: ${error.message}`);
-      return false;
-    }
+    
+    const removedTab = this.projectTabs[index];
+    this.projectTabs.splice(index, 1);
+    this.saveProjectTabs();
+    
+    logger.info(`Project tab removed: ${removedTab.projectName} (${tabId})`);
+    
+    return true;
   }
   
   /**
    * Get all project tabs
-   * @returns {Array<Object>} Project tabs
+   * @returns {Array} Project tabs
    */
   getAllProjectTabs() {
-    return [...this.projectTabs];
+    return this.projectTabs;
   }
   
   /**
    * Get a project by name
-   * @param {string} projectName - Name of the project
-   * @returns {Object} Project object or null if not found
+   * @param {string} projectName - Project name
+   * @returns {Object|null} Project tab or null if not found
    */
   getProjectByName(projectName) {
-    // Find the tab with the matching project name
-    const tab = this.projectTabs.find(tab => tab.projectName === projectName);
-    
-    if (!tab) {
-      return null;
-    }
-    
-    // Get the project from the project manager
-    return this.projectManager.getProject(tab.projectName);
+    return this.projectTabs.find(tab => tab.projectName === projectName) || null;
   }
   
   /**
-   * Get the active project tab
-   * @returns {Object} Active tab or null if none
+   * Get a project by ID
+   * @param {string} tabId - Tab ID
+   * @returns {Object|null} Project tab or null if not found
    */
-  getActiveTab() {
-    if (this.projectTabs.length === 0) {
-      return null;
-    }
-    return this.projectTabs[this.activeTabIndex];
+  getProject(tabId) {
+    return this.projectTabs.find(tab => tab.id === tabId) || null;
   }
   
   /**
-   * Initialize a project with template files
-   * @param {string} tabId - ID of the tab to initialize
-   * @returns {boolean} Success status
+   * Initialize a project
+   * @param {string} tabId - Tab ID
+   * @returns {Promise<boolean>} Success status
    */
   async initializeProject(tabId) {
     try {
-      const tabIndex = this.projectTabs.findIndex(tab => tab.id === tabId);
-      if (tabIndex === -1) {
-        throw new Error(`Tab not found: ${tabId}`);
+      const tab = this.getProject(tabId);
+      
+      if (!tab) {
+        throw new Error(`Project tab not found: ${tabId}`);
       }
       
-      const tab = this.projectTabs[tabIndex];
-      const project = this.projectManager.getProject(tab.projectName);
+      const projectPath = path.join(this.projectsDir, tab.projectName);
       
-      if (!project) {
-        throw new Error(`Project not found: ${tab.projectName}`);
+      // Check if project directory exists
+      if (!fs.existsSync(projectPath)) {
+        throw new Error(`Project directory not found: ${projectPath}`);
       }
       
-      // Initialize templates
-      project.initializeTemplates();
+      // Copy template files to project
+      const templateFiles = [
+        'GenerateSTRUCTURE\'current\'.promptp',
+        'generateSTRUCTURE\'suggested\'.prompt',
+        'GenerateSTEP.prompt',
+        'GenerateREADMERules.prompt'
+      ];
       
-      // Push changes
-      await project.pushChanges();
+      const templatesDir = path.join(process.cwd(), 'templates');
       
-      // Update tab status
-      tab.isInitialized = true;
-      tab.status = 'initialized';
-      tab.initializedAt = new Date().toISOString();
+      for (const file of templateFiles) {
+        const sourcePath = path.join(templatesDir, file);
+        const destPath = path.join(projectPath, file);
+        
+        // Check if template exists
+        if (fs.existsSync(sourcePath)) {
+          fs.copySync(sourcePath, destPath);
+          logger.info(`Copied template: ${file} to ${tab.projectName}`);
+        } else {
+          // Create default template
+          await this.createDefaultTemplate(file, destPath);
+          logger.info(`Created default template: ${file} in ${tab.projectName}`);
+        }
+      }
       
-      // Save configuration
+      // Update project tab
+      const index = this.projectTabs.findIndex(t => t.id === tabId);
+      this.projectTabs[index].isInitialized = true;
+      this.projectTabs[index].updatedAt = new Date().toISOString();
       this.saveProjectTabs();
       
-      logger.info(`Initialized project: ${tab.projectName}`);
+      logger.info(`Project initialized: ${tab.projectName} (${tabId})`);
+      
       return true;
     } catch (error) {
       logger.error(`Failed to initialize project: ${error.message}`);
@@ -265,216 +235,266 @@ class MultiProjectManager {
   }
   
   /**
-   * Initialize multiple projects in batch
-   * @param {Array<string>} tabIds - IDs of tabs to initialize
-   * @returns {Object} Results object with success and failures
+   * Create a default template file
+   * @param {string} templateName - Template name
+   * @param {string} destPath - Destination path
+   * @returns {Promise<void>}
    */
-  async initializeMultipleProjects(tabIds) {
-    try {
-      const results = {
-        success: [],
-        failure: []
-      };
-      
-      for (const tabId of tabIds) {
-        try {
-          const success = await this.initializeProject(tabId);
-          if (success) {
-            results.success.push(tabId);
-          } else {
-            results.failure.push({ tabId, error: 'Initialization failed' });
-          }
-        } catch (error) {
-          logger.error(`Failed to initialize project (tab ${tabId}): ${error.message}`);
-          results.failure.push({ tabId, error: error.message });
-        }
-      }
-      
-      logger.info(`Initialized ${results.success.length} of ${tabIds.length} projects`);
-      return results;
-    } catch (error) {
-      logger.error(`Batch project initialization failed: ${error.message}`);
-      throw error;
+  async createDefaultTemplate(templateName, destPath) {
+    let content = '';
+    
+    switch (templateName) {
+      case 'GenerateSTRUCTURE\'current\'.promptp':
+        content = 'Analyze the current project structure and provide a detailed overview of the codebase organization, key components, and architecture.';
+        break;
+      case 'generateSTRUCTURE\'suggested\'.prompt':
+        content = 'Based on the current project structure, suggest improvements and additional features that would enhance the application.';
+        break;
+      case 'GenerateSTEP.prompt':
+        content = 'Create a step-by-step implementation plan for the project, breaking down the development into manageable phases with concurrent components.';
+        break;
+      case 'GenerateREADMERules.prompt':
+        content = 'Generate a comprehensive README.md file for the project, including installation instructions, usage examples, and contribution guidelines.';
+        break;
+      default:
+        content = `Default template content for ${templateName}`;
     }
+    
+    await fs.writeFile(destPath, content);
   }
   
   /**
-   * Apply a workflow to a project
-   * @param {string} tabId - ID of the tab
-   * @param {string} workflowId - ID of the workflow to apply
-   * @returns {boolean} Success status
-   */
-  async applyWorkflowToProject(tabId, workflowId) {
-    try {
-      const tabIndex = this.projectTabs.findIndex(tab => tab.id === tabId);
-      if (tabIndex === -1) {
-        throw new Error(`Tab not found: ${tabId}`);
-      }
-      
-      const tab = this.projectTabs[tabIndex];
-      
-      // Update tab with workflow ID
-      tab.workflowId = workflowId;
-      tab.workflowAppliedAt = new Date().toISOString();
-      
-      // Save configuration
-      this.saveProjectTabs();
-      
-      logger.info(`Applied workflow ${workflowId} to project: ${tab.projectName}`);
-      return true;
-    } catch (error) {
-      logger.error(`Failed to apply workflow: ${error.message}`);
-      return false;
-    }
-  }
-  
-  /**
-   * Apply a workflow to multiple projects in batch
-   * @param {Array<string>} tabIds - IDs of tabs
-   * @param {string} workflowId - ID of the workflow to apply
-   * @returns {Object} Results object with success and failures
-   */
-  async applyWorkflowToMultipleProjects(tabIds, workflowId) {
-    try {
-      const results = {
-        success: [],
-        failure: []
-      };
-      
-      for (const tabId of tabIds) {
-        try {
-          const success = await this.applyWorkflowToProject(tabId, workflowId);
-          if (success) {
-            results.success.push(tabId);
-          } else {
-            results.failure.push({ tabId, error: 'Workflow application failed' });
-          }
-        } catch (error) {
-          logger.error(`Failed to apply workflow to project (tab ${tabId}): ${error.message}`);
-          results.failure.push({ tabId, error: error.message });
-        }
-      }
-      
-      logger.info(`Applied workflow to ${results.success.length} of ${tabIds.length} projects`);
-      return results;
-    } catch (error) {
-      logger.error(`Batch workflow application failed: ${error.message}`);
-      throw error;
-    }
-  }
-  
-  /**
-   * Check if a project has required template files
-   * @param {string} tabId - ID of the tab
-   * @returns {Object} Check result with details
+   * Check if a project is initialized
+   * @param {string} tabId - Tab ID
+   * @returns {Promise<Object>} Initialization status
    */
   async checkProjectInitialization(tabId) {
     try {
-      const tabIndex = this.projectTabs.findIndex(tab => tab.id === tabId);
-      if (tabIndex === -1) {
-        throw new Error(`Tab not found: ${tabId}`);
+      const tab = this.getProject(tabId);
+      
+      if (!tab) {
+        throw new Error(`Project tab not found: ${tabId}`);
       }
       
-      const tab = this.projectTabs[tabIndex];
-      const project = this.projectManager.getProject(tab.projectName);
+      const projectPath = path.join(this.projectsDir, tab.projectName);
       
-      if (!project) {
-        throw new Error(`Project not found: ${tab.projectName}`);
+      // Check if project directory exists
+      if (!fs.existsSync(projectPath)) {
+        return {
+          isInitialized: false,
+          missingFiles: ['project directory']
+        };
       }
       
-      // List of template files to check for
-      const requiredTemplates = [
+      // Check for required files
+      const requiredFiles = [
         'GenerateSTRUCTURE\'current\'.promptp',
         'generateSTRUCTURE\'suggested\'.prompt',
         'GenerateSTEP.prompt',
         'GenerateREADMERules.prompt'
       ];
       
-      // Check if each template exists in the project
-      const checkResults = {};
-      let allTemplatesExist = true;
+      const missingFiles = [];
       
-      for (const template of requiredTemplates) {
-        const templatePath = path.join(project.path, template);
-        const exists = await fs.pathExists(templatePath);
-        checkResults[template] = exists;
-        if (!exists) {
-          allTemplatesExist = false;
+      for (const file of requiredFiles) {
+        const filePath = path.join(projectPath, file);
+        
+        if (!fs.existsSync(filePath)) {
+          missingFiles.push(file);
         }
       }
       
-      // Update tab status
-      if (allTemplatesExist) {
-        tab.isInitialized = true;
-        tab.status = 'initialized';
-        if (!tab.initializedAt) {
-          tab.initializedAt = new Date().toISOString();
-        }
+      const isInitialized = missingFiles.length === 0;
+      
+      // Update project tab if needed
+      if (isInitialized !== tab.isInitialized) {
+        const index = this.projectTabs.findIndex(t => t.id === tabId);
+        this.projectTabs[index].isInitialized = isInitialized;
+        this.projectTabs[index].updatedAt = new Date().toISOString();
         this.saveProjectTabs();
       }
       
       return {
-        isInitialized: allTemplatesExist,
-        details: checkResults
+        isInitialized,
+        missingFiles
       };
     } catch (error) {
       logger.error(`Failed to check project initialization: ${error.message}`);
-      throw error;
+      return {
+        isInitialized: false,
+        error: error.message
+      };
     }
   }
   
   /**
-   * Get the status of all projects
-   * @returns {Array<Object>} Status of all project tabs
+   * Get project status
+   * @param {string} tabId - Tab ID
+   * @returns {Promise<Object>} Project status
    */
-  async getProjectsStatus() {
+  async getProjectStatus(tabId) {
     try {
-      const statusResults = [];
+      const tab = this.getProject(tabId);
       
-      for (const tab of this.projectTabs) {
-        try {
-          // Get project instance
-          const project = this.projectManager.getProject(tab.projectName);
-          
-          // Check initialization status if not already initialized
-          let initializationStatus = { isInitialized: tab.isInitialized };
-          if (!tab.isInitialized) {
-            initializationStatus = await this.checkProjectInitialization(tab.id);
-          }
-          
-          // Get workflow status if workflow is assigned
-          let workflowStatus = null;
-          if (tab.workflowId) {
-            // In a real implementation, this would get actual workflow status
-            workflowStatus = {
-              id: tab.workflowId,
-              status: 'pending' // Placeholder
-            };
-          }
-          
-          statusResults.push({
-            tab: { ...tab },
-            project: project ? {
-              name: project.config.name,
-              path: project.path,
-              hasSteps: !!project.steps
-            } : null,
-            initialization: initializationStatus,
-            workflow: workflowStatus
-          });
-        } catch (error) {
-          logger.error(`Failed to get status for project ${tab.projectName}: ${error.message}`);
-          statusResults.push({
-            tab: { ...tab },
-            error: error.message
-          });
-        }
+      if (!tab) {
+        throw new Error(`Project tab not found: ${tabId}`);
       }
       
-      return statusResults;
+      const projectPath = path.join(this.projectsDir, tab.projectName);
+      
+      // Check if project directory exists
+      if (!fs.existsSync(projectPath)) {
+        return {
+          status: 'missing',
+          error: 'Project directory not found'
+        };
+      }
+      
+      // Check initialization status
+      const initStatus = await this.checkProjectInitialization(tabId);
+      
+      // Get project configuration
+      const configPath = path.join(projectPath, 'project.json');
+      let config = {};
+      
+      if (fs.existsSync(configPath)) {
+        config = fs.readJsonSync(configPath);
+      }
+      
+      // Check for STEPS.md
+      const stepsPath = path.join(projectPath, 'STEPS.md');
+      const hasSteps = fs.existsSync(stepsPath);
+      
+      // Check for STRUCTURE.md
+      const structurePath = path.join(projectPath, 'STRUCTURE.md');
+      const hasStructure = fs.existsSync(structurePath);
+      
+      // Check git status
+      let gitStatus = null;
+      
+      try {
+        if (fs.existsSync(path.join(projectPath, '.git'))) {
+          const { stdout } = await execAsync('git status --porcelain', { cwd: projectPath });
+          gitStatus = {
+            hasChanges: stdout.trim().length > 0,
+            changes: stdout.trim()
+          };
+        }
+      } catch (error) {
+        logger.warn(`Failed to get git status: ${error.message}`);
+      }
+      
+      return {
+        id: tab.id,
+        name: tab.projectName,
+        repoUrl: tab.repoUrl,
+        isLocal: tab.isLocal,
+        isInitialized: initStatus.isInitialized,
+        status: tab.status,
+        addedAt: tab.addedAt,
+        updatedAt: tab.updatedAt,
+        config,
+        hasSteps,
+        hasStructure,
+        gitStatus
+      };
     } catch (error) {
-      logger.error(`Failed to get projects status: ${error.message}`);
-      throw error;
+      logger.error(`Failed to get project status: ${error.message}`);
+      return {
+        status: 'error',
+        error: error.message
+      };
+    }
+  }
+  
+  /**
+   * Get status for all projects
+   * @returns {Promise<Array>} Project statuses
+   */
+  async getProjectsStatus() {
+    const statuses = [];
+    
+    for (const tab of this.projectTabs) {
+      try {
+        const status = await this.getProjectStatus(tab.id);
+        statuses.push(status);
+      } catch (error) {
+        logger.error(`Failed to get status for project ${tab.projectName}: ${error.message}`);
+        statuses.push({
+          id: tab.id,
+          name: tab.projectName,
+          status: 'error',
+          error: error.message
+        });
+      }
+    }
+    
+    return statuses;
+  }
+  
+  /**
+   * Create a new project
+   * @param {Object} projectData - Project data
+   * @returns {Promise<Object>} Creation result
+   */
+  async createProject(projectData) {
+    try {
+      if (!projectData.name) {
+        throw new Error('Project name is required');
+      }
+      
+      // Check if project already exists
+      const existingProject = this.getProjectByName(projectData.name);
+      
+      if (existingProject) {
+        throw new Error(`Project ${projectData.name} already exists`);
+      }
+      
+      // Create project directory
+      const projectPath = path.join(this.projectsDir, projectData.name);
+      fs.ensureDirSync(projectPath);
+      
+      // Create project configuration
+      const configPath = path.join(projectPath, 'project.json');
+      const config = {
+        name: projectData.name,
+        description: projectData.description || '',
+        repository: projectData.repoUrl || null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      fs.writeJsonSync(configPath, config, { spaces: 2 });
+      
+      // Create README.md
+      const readmePath = path.join(projectPath, 'README.md');
+      const readmeContent = `# ${projectData.name}\\n\\n${projectData.description || ''}\\n`;
+      fs.writeFileSync(readmePath, readmeContent);
+      
+      // Add project tab
+      const tab = await this.addProjectTab({
+        projectName: projectData.name,
+        repoUrl: projectData.repoUrl,
+        isLocal: !projectData.repoUrl
+      });
+      
+      // Initialize project if requested
+      if (projectData.initialize) {
+        await this.initializeProject(tab.id);
+      }
+      
+      logger.info(`Project created: ${projectData.name}`);
+      
+      return {
+        success: true,
+        project: tab
+      };
+    } catch (error) {
+      logger.error(`Failed to create project: ${error.message}`);
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 }

@@ -17,7 +17,7 @@ class MessageQueueManager extends EventEmitter {
   constructor(config = {}) {
     super();
     this.config = config;
-    this.cursorAutomation = null;
+    this.cursorManager = null;
     this.templates = {};
     this.sentMessages = [];
     this.batchHistory = [];
@@ -40,12 +40,12 @@ class MessageQueueManager extends EventEmitter {
   }
 
   /**
-   * Set the cursor automation instance
-   * @param {Object} cursorAutomation - Cursor automation instance
+   * Set the cursor manager instance
+   * @param {Object} cursorManager - Cursor manager instance
    */
-  setCursorAutomation(cursorAutomation) {
-    this.cursorAutomation = cursorAutomation;
-    logger.info('Cursor automation set for message queue manager');
+  setCursorManager(cursorManager) {
+    this.cursorManager = cursorManager;
+    logger.info('Cursor manager set for message queue manager');
   }
 
   /**
@@ -137,7 +137,7 @@ class MessageQueueManager extends EventEmitter {
         this.processingTimer = setTimeout(() => this.processQueue(), delay);
       }
     } catch (error) {
-      logger.logError('Error processing message queue', error);
+      logger.error('Error processing message queue', error);
     } finally {
       this.isProcessing = false;
     }
@@ -159,17 +159,20 @@ class MessageQueueManager extends EventEmitter {
       // Get input position name
       const positionName = message.inputPosition || this.config.defaultInputPosition;
       
-      // Check if cursor automation is available
-      if (!this.cursorAutomation) {
-        throw new Error('Cursor automation not set');
+      // Check if cursor manager is available
+      if (!this.cursorManager) {
+        throw new Error('Cursor manager not set');
       }
       
-      // Send the message using cursor automation
+      // Send the message using cursor manager
       const content = typeof message.content === 'string' 
         ? message.content 
         : JSON.stringify(message.content);
       
-      const success = await this.cursorAutomation.sendTextToPosition(positionName, content);
+      const success = await this.cursorManager.sendTextToPosition(positionName, content, {
+        clickBeforeTyping: true,
+        delay: this.config.clickDelay || 500
+      });
       
       // Update message status
       message.status = success ? 'completed' : 'failed';
@@ -188,7 +191,7 @@ class MessageQueueManager extends EventEmitter {
       
       return success;
     } catch (error) {
-      logger.logError(`Failed to process message: ${message.id}`, error);
+      logger.error(`Failed to process message: ${message.id}`, error);
       
       // Update message status
       message.status = 'failed';
@@ -311,7 +314,7 @@ class MessageQueueManager extends EventEmitter {
         estimatedTime: messages.length * ((delay || this.config.messageDelay || 5000) / 1000)
       };
     } catch (error) {
-      logger.logError('Failed to send batch', error);
+      logger.error('Failed to send batch', error);
       this.activeTransmission = false;
       throw error;
     }
@@ -347,7 +350,7 @@ class MessageQueueManager extends EventEmitter {
       
       return this.templates;
     } catch (error) {
-      logger.logError('Failed to load message templates', error);
+      logger.error('Failed to load message templates', error);
       this.createDefaultTemplate();
       return this.templates;
     }
@@ -378,7 +381,7 @@ Please follow these guidelines:
       
       logger.info('Created default message template');
     } catch (error) {
-      logger.logError('Failed to create default template', error);
+      logger.error('Failed to create default template', error);
     }
   }
 
@@ -419,7 +422,7 @@ Please follow these guidelines:
       logger.info(`Created message template: ${name}`);
       return true;
     } catch (error) {
-      logger.logError(`Failed to create template ${name}`, error);
+      logger.error(`Failed to create template ${name}`, error);
       return false;
     }
   }
@@ -444,7 +447,7 @@ Please follow these guidelines:
       logger.info(`Updated message template: ${name}`);
       return true;
     } catch (error) {
-      logger.logError(`Failed to update template ${name}`, error);
+      logger.error(`Failed to update template ${name}`, error);
       return false;
     }
   }
@@ -474,7 +477,7 @@ Please follow these guidelines:
       logger.info(`Deleted message template: ${name}`);
       return true;
     } catch (error) {
-      logger.logError(`Failed to delete template ${name}`, error);
+      logger.error(`Failed to delete template ${name}`, error);
       return false;
     }
   }
@@ -504,10 +507,10 @@ Please follow these guidelines:
             req.text.toLowerCase().includes(component.name.toLowerCase())
           )
           .map(req => `- ${req.text}`)
-          .join('\n');
+          .join('\\n');
         
         if (relevantRequirements) {
-          messageContent += `\n\nRelevant requirements:\n${relevantRequirements}`;
+          messageContent += `\\n\\nRelevant requirements:\\n${relevantRequirements}`;
         }
       }
       
@@ -527,7 +530,7 @@ Please follow these guidelines:
       
       return true;
     } catch (error) {
-      logger.logError('Failed to send templated message', error);
+      logger.error('Failed to send templated message', error);
       return false;
     }
   }
@@ -575,7 +578,7 @@ Please follow these guidelines:
       logger.info(`Found ${components.length} components to include in batch`);
       return components;
     } catch (error) {
-      logger.logError('Failed to create component batch', error);
+      logger.error('Failed to create component batch', error);
       return [];
     }
   }

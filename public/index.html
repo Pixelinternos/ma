@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Depla Project Manager</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/react@17.0.2/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@17.0.2/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios@0.24.0/dist/axios.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6.26.0/babel.min.js"></script>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    
+    const App = () => {
+      const [activeTab, setActiveTab] = useState('projects');
+      const [projects, setProjects] = useState([]);
+      const [cursorPositions, setCursorPositions] = useState([]);
+      const [queueStatus, setQueueStatus] = useState(null);
+      const [automationStatus, setAutomationStatus] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      
+      useEffect(() => {
+        fetchData();
+      }, []);
+      
+      const fetchData = async () => {
+        setLoading(true);
+        try {
+          // Fetch projects
+          const projectsResponse = await axios.get('/api/projects');
+          setProjects(projectsResponse.data.projects || []);
+          
+          // Fetch cursor positions
+          const positionsResponse = await axios.get('/api/cursor-positions');
+          setCursorPositions(positionsResponse.data.positions || []);
+          
+          // Fetch queue status
+          const queueResponse = await axios.get('/api/messages/queue');
+          setQueueStatus(queueResponse.data.queueStatus);
+          
+          // Fetch automation status
+          const automationResponse = await axios.get('/api/automation/status');
+          setAutomationStatus(automationResponse.data.status);
+          
+          setError(null);
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+      
+      const addProject = async (event) => {
+        event.preventDefault();
+        const repoUrl = event.target.repoUrl.value;
+        const projectName = event.target.projectName.value;
+        
+        try {
+          await axios.post('/api/projects', { repoUrl, projectName });
+          fetchData();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+      
+      const initializeProject = async (projectId) => {
+        try {
+          await axios.post(`/api/projects/${projectId}/initialize`);
+          fetchData();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+      
+      const captureCursorPosition = async (event) => {
+        event.preventDefault();
+        const name = event.target.positionName.value;
+        const interfaceType = event.target.interfaceType.value;
+        
+        try {
+          await axios.post('/api/cursor-positions/capture', { 
+            name, 
+            metadata: { interface: interfaceType } 
+          });
+          fetchData();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+      
+      const deleteCursorPosition = async (name) => {
+        try {
+          await axios.delete(`/api/cursor-positions/${name}`);
+          fetchData();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+      
+      const sendMessage = async (event) => {
+        event.preventDefault();
+        const content = event.target.messageContent.value;
+        const inputPosition = event.target.inputPosition.value;
+        const priority = event.target.priority.value;
+        
+        try {
+          await axios.post('/api/messages', {
+            message: {
+              content,
+              inputPosition
+            },
+            priority
+          });
+          fetchData();
+          event.target.reset();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+      
+      const toggleAutomation = async () => {
+        try {
+          if (automationStatus?.enabled) {
+            await axios.post('/api/automation/stop');
+          } else {
+            await axios.post('/api/automation/start');
+          }
+          fetchData();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+      
+      const toggleQueueProcessing = async () => {
+        try {
+          if (queueStatus?.isPaused) {
+            await axios.post('/api/messages/queue/resume');
+          } else {
+            await axios.post('/api/messages/queue/pause');
+          }
+          fetchData();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+      
+      return (
+        <div className="container mx-auto px-4 py-8">
+          <h1 className="text-3xl font-bold mb-6">Depla Project Manager</h1>
+          
+          {error && (
+            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+              <strong>Error:</strong> {error}
+            </div>
+          )}
+          
+          <div className="flex mb-6">
+            <button 
+              className={`px-4 py-2 mr-2 ${activeTab === 'projects' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+              onClick={() => setActiveTab('projects')}
+            >
+              Projects
+            </button>
+            <button 
+              className={`px-4 py-2 mr-2 ${activeTab === 'cursor' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+              onClick={() => setActiveTab('cursor')}
+            >
+              Cursor Positions
+            </button>
+            <button 
+              className={`px-4 py-2 mr-2 ${activeTab === 'messages' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+              onClick={() => setActiveTab('messages')}
+            >
+              Messages
+            </button>
+            <button 
+              className={`px-4 py-2 ${activeTab === 'automation' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+              onClick={() => setActiveTab('automation')}
+            >
+              Automation
+            </button>
+          </div>
+          
+          {loading ? (
+            <div className="flex justify-center">
+              <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+            </div>
+          ) : (
+            <>
+              {activeTab === 'projects' && (
+                <div>
+                  <h2 className="text-2xl font-bold mb-4">Projects</h2>
+                  
+                  <div className="bg-white p-4 rounded shadow mb-6">
+                    <h3 className="text-lg font-semibold mb-2">Add Project</h3>
+                    <form onSubmit={addProject} className="flex flex-col space-y-4">
+                      <div>
+                        <label className="block mb-1">Repository URL:</label>
+                        <input 
+                          type="text" 
+                          name="repoUrl" 
+                          className="w-full p-2 border rounded"
+                          placeholder="https://github.com/username/repo"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1">Project Name (optional):</label>
+                        <input 
+                          type="text" 
+                          name="projectName" 
+                          className="w-full p-2 border rounded"
+                          placeholder="Leave blank to use repo name"
+                        />
+                      </div>
+                      <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded">
+                        Add Project
+                      </button>
+                    </form>
+                  </div>
+                  
+                  <div className="bg-white p-4 rounded shadow">
+                    <h3 className="text-lg font-semibold mb-2">Project List</h3>
+                    {projects.length === 0 ? (
+                      <p>No projects found.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full">
+                          <thead>
+                            <tr className="bg-gray-100">
+                              <th className="px-4 py-2 text-left">Name</th>
+                              <th className="px-4 py-2 text-left">Status</th>
+                              <th className="px-4 py-2 text-left">Repository</th>
+                              <th className="px-4 py-2 text-left">Initialized</th>
+                              <th className="px-4 py-2 text-left">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {projects.map(project => (
+                              <tr key={project.id} className="border-t">
+                                <td className="px-4 py-2">{project.name}</td>
+                                <td className="px-4 py-2">{project.status}</td>
+                                <td className="px-4 py-2">{project.repoUrl || 'Local'}</td>
+                                <td className="px-4 py-2">
+                                  {project.isInitialized ? 'Yes' : 'No'}
+                                </td>
+                                <td className="px-4 py-2">
+                                  {!project.isInitialized && (
+                                    <button 
+                                      onClick={() => initializeProject(project.id)}
+                                      className="bg-green-500 text-white px-2 py-1 rounded text-sm"
+                                    >
+                                      Initialize
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              {activeTab === 'cursor' && (
+                <div>
+                  <h2 className="text-2xl font-bold mb-4">Cursor Positions</h2>
+                  
+                  <div className="bg-white p-4 rounded shadow mb-6">
+                    <h3 className="text-lg font-semibold mb-2">Capture Cursor Position</h3>
+                    <form onSubmit={captureCursorPosition} className="flex flex-col space-y-4">
+                      <div>
+                        <label className="block mb-1">Position Name:</label>
+                        <input 
+                          type="text" 
+                          name="positionName" 
+                          className="w-full p-2 border rounded"
+                          placeholder="e.g., chatgpt-input"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1">Interface Type:</label>
+                        <select name="interfaceType" className="w-full p-2 border rounded">
+                          <option value="web">Web Interface</option>
+                          <option value="desktop">Desktop Application</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </div>
+                      <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded">
+                        Capture Position
+                      </button>
+                    </form>
+                  </div>
+                  
+                  <div className="bg-white p-4 rounded shadow">
+                    <h3 className="text-lg font-semibold mb-2">Saved Positions</h3>
+                    {cursorPositions.length === 0 ? (
+                      <p>No cursor positions saved.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full">
+                          <thead>
+                            <tr className="bg-gray-100">
+                              <th className="px-4 py-2 text-left">Name</th>
+                              <th className="px-4 py-2 text-left">Coordinates</th>
+                              <th className="px-4 py-2 text-left">Interface</th>
+                              <th className="px-4 py-2 text-left">Created</th>
+                              <th className="px-4 py-2 text-left">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {cursorPositions.map(position => (
+                              <tr key={position.name} className="border-t">
+                                <td className="px-4 py-2">{position.name}</td>
+                                <td className="px-4 py-2">({position.x}, {position.y})</td>
+                                <td className="px-4 py-2">{position.metadata?.interface || 'Unknown'}</td>
+                                <td className="px-4 py-2">
+                                  {new Date(position.createdAt).toLocaleString()}
+                                </td>
+                                <td className="px-4 py-2">
+                                  <button 
+                                    onClick={() => deleteCursorPosition(position.name)}
+                                    className="bg-red-500 text-white px-2 py-1 rounded text-sm"
+                                  >
+                                    Delete
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              {activeTab === 'messages' && (
+                <div>
+                  <h2 className="text-2xl font-bold mb-4">Messages</h2>
+                  
+                  <div className="bg-white p-4 rounded shadow mb-6">
+                    <h3 className="text-lg font-semibold mb-2">Send Message</h3>
+                    <form onSubmit={sendMessage} className="flex flex-col space-y-4">
+                      <div>
+                        <label className="block mb-1">Message Content:</label>
+                        <textarea 
+                          name="messageContent" 
+                          className="w-full p-2 border rounded"
+                          rows="4"
+                          placeholder="Enter message content"
+                          required
+                        ></textarea>
+                      </div>
+                      <div>
+                        <label className="block mb-1">Input Position:</label>
+                        <select name="inputPosition" className="w-full p-2 border rounded">
+                          {cursorPositions.map(position => (
+                            <option key={position.name} value={position.name}>
+                              {position.name} ({position.metadata?.interface || 'Unknown'})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block mb-1">Priority:</label>
+                        <select name="priority" className="w-full p-2 border rounded">
+                          <option value="high">High</option>
+                          <option value="normal" selected>Normal</option>
+                          <option value="low">Low</option>
+                        </select>
+                      </div>
+                      <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded">
+                        Send Message
+                      </button>
+                    </form>
+                  </div>
+                  
+                  <div className="bg-white p-4 rounded shadow">
+                    <h3 className="text-lg font-semibold mb-2">Queue Status</h3>
+                    {queueStatus ? (
+                      <div>
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                          <div>
+                            <p><strong>High Priority:</strong> {queueStatus.high}</p>
+                            <p><strong>Normal Priority:</strong> {queueStatus.normal}</p>
+                            <p><strong>Low Priority:</strong> {queueStatus.low}</p>
+                          </div>
+                          <div>
+                            <p><strong>Total Queued:</strong> {queueStatus.total}</p>
+                            <p><strong>Processing:</strong> {queueStatus.isProcessing ? 'Yes' : 'No'}</p>
+                            <p><strong>Paused:</strong> {queueStatus.isPaused ? 'Yes' : 'No'}</p>
+                          </div>
+                        </div>
+                        <button 
+                          onClick={toggleQueueProcessing}
+                          className={`${queueStatus.isPaused ? 'bg-green-500' : 'bg-yellow-500'} text-white px-4 py-2 rounded`}
+                        >
+                          {queueStatus.isPaused ? 'Resume Processing' : 'Pause Processing'}
+                        </button>
+                      </div>
+                    ) : (
+                      <p>Queue status not available.</p>
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              {activeTab === 'automation' && (
+                <div>
+                  <h2 className="text-2xl font-bold mb-4">Automation</h2>
+                  
+                  <div className="bg-white p-4 rounded shadow mb-6">
+                    <h3 className="text-lg font-semibold mb-2">Automation Status</h3>
+                    {automationStatus ? (
+                      <div>
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                          <div>
+                            <p><strong>Enabled:</strong> {automationStatus.enabled ? 'Yes' : 'No'}</p>
+                            <p><strong>Processing:</strong> {automationStatus.isProcessing ? 'Yes' : 'No'}</p>
+                          </div>
+                          <div>
+                            <p><strong>PR Analysis Queue:</strong> {automationStatus.prAnalysisQueue}</p>
+                            <p><strong>Merge Queue:</strong> {automationStatus.mergeQueue}</p>
+                            <p><strong>Active Workflows:</strong> {automationStatus.activeWorkflows}</p>
+                          </div>
+                        </div>
+                        <button 
+                          onClick={toggleAutomation}
+                          className={`${automationStatus.enabled ? 'bg-red-500' : 'bg-green-500'} text-white px-4 py-2 rounded`}
+                        >
+                          {automationStatus.enabled ? 'Stop Automation' : 'Start Automation'}
+                        </button>
+                      </div>
+                    ) : (
+                      <p>Automation status not available.</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      );
+    };
+    
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>

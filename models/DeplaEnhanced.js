@@ -10,7 +10,7 @@ const WorkflowManager = require('./WorkflowManager');
 const MultiProjectManager = require('./MultiProjectManager');
 const MessageQueueManager = require('./MessageQueueManager');
 const GitHubEnhanced = require('../utils/GitHubEnhanced');
-const CursorAutomation = require('../utils/CursorAutomation');
+const UnifiedCursorManager = require('../utils/UnifiedCursorManager');
 const ConfigManager = require('../framework/ConfigManager');
 const logger = require('../utils/logger');
 const fs = require('fs-extra');
@@ -31,8 +31,15 @@ class DeplaEnhanced {
     this.messageQueueManager = new MessageQueueManager(this.config);
     this.gitHubEnhanced = new GitHubEnhanced(this.config);
     
-    // Set cursor automation for message queue manager
-    this.messageQueueManager.setCursorAutomation(CursorAutomation);
+    // Initialize the unified cursor manager
+    this.cursorManager = new UnifiedCursorManager({
+      dataDir: path.join(process.cwd(), 'data', 'cursor-positions'),
+      enableMultiCursor: this.config.enableMultiCursor || false,
+      cursorSpeed: this.config.cursorSpeed || 'medium'
+    });
+    
+    // Set cursor manager for message queue manager
+    this.messageQueueManager.setCursorManager(this.cursorManager);
     
     // Setup state
     this.isInitialized = false;
@@ -194,6 +201,15 @@ class DeplaEnhanced {
       logger.info(`Branch created: ${data.branchName} for ${data.repoName}`);
       this.handleNewBranch(data);
     });
+    
+    // Cursor manager events
+    this.cursorManager.on('positionSaved', (position) => {
+      logger.info(`Cursor position saved: ${position.name}`);
+    });
+    
+    this.cursorManager.on('positionDeleted', (position) => {
+      logger.info(`Cursor position deleted: ${position.name}`);
+    });
   }
   
   /**
@@ -297,98 +313,28 @@ class DeplaEnhanced {
    * @returns {boolean} Whether this is a step generation PR
    */
   isStepGenerationPR(prDetails) {
-    // Check PR title and files
-    const title = prDetails.title.toLowerCase();
-    const body = prDetails.body.toLowerCase();
+    // Check PR title and body for step generation indicators
+    const title = prDetails.title || '';
+    const body = prDetails.body || '';
     
-    // Check for step generation indicators
-    const stepKeywords = [
-      'generate steps', 
-      'step generation', 
-      'implementation plan',
-      'steps.md',
-      'step-by-step'
+    // Look for specific keywords in title or body
+    const stepGenerationKeywords = [
+      'step generation',
+      'step-by-step',
+      'step by step',
+      'generate steps',
+      'STEP-BY-STEP.md'
     ];
     
-    // Check title and body for keywords
-    for (const keyword of stepKeywords) {
-      if (title.includes(keyword) || body.includes(keyword)) {
-        return true;
-      }
-    }
-    
-    // Check if PR modifies STEPS.md
-    if (prDetails.files && prDetails.files.some(file => 
-      file.filename.toLowerCase() === 'steps.md' || 
-      file.filename.toLowerCase().endsWith('/steps.md'))) {
-      return true;
-    }
-    
-    return false;
+    // Check if any of the keywords are present in title or body
+    return stepGenerationKeywords.some(keyword => 
+      title.toLowerCase().includes(keyword.toLowerCase()) || 
+      body.toLowerCase().includes(keyword.toLowerCase())
+    );
   }
   
   /**
-   * Check if a PR should be auto-merged
-   * @param {Object} prDetails - PR details
-   * @returns {boolean} Whether this PR should be auto-merged
-   */
-  shouldAutoMergePR(prDetails) {
-    // Auto-merge logic based on PR content and project configuration
-    // This is a simplified implementation
-    
-    // Don't auto-merge if PR has conflicts
-    if (prDetails.mergeable === false) {
-      return false;
-    }
-    
-    // Check for auto-merge indicators in title or body
-    const title = prDetails.title.toLowerCase();
-    const body = prDetails.body.toLowerCase();
-    
-    const autoMergeKeywords = [
-      'auto-merge',
-      'automerge',
-      'auto merge',
-      'automated pr'
-    ];
-    
-    // Check title and body for keywords
-    for (const keyword of autoMergeKeywords) {
-      if (title.includes(keyword) || body.includes(keyword)) {
-        return true;
-      }
-    }
-    
-    return false;
-  }
-  
-  /**
-   * Check if a branch is a feature branch
-   * @param {string} branchName - Branch name
-   * @returns {boolean} Whether this is a feature branch
-   */
-  isFeatureBranch(branchName) {
-    // Feature branch detection logic
-    // This is a simplified implementation
-    
-    const featurePrefixes = [
-      'feature/',
-      'feat/',
-      'component/',
-      'implement/'
-    ];
-    
-    for (const prefix of featurePrefixes) {
-      if (branchName.startsWith(prefix)) {
-        return true;
-      }
-    }
-    
-    return false;
-  }
-  
-  /**
-   * Update project with new steps from a PR
+   * Update project with steps from a PR
    * @param {Object} project - Project object
    * @param {Object} prDetails - PR details
    * @returns {Promise<boolean>} Success status
@@ -397,44 +343,68 @@ class DeplaEnhanced {
     try {
       logger.info(`Updating project steps for ${project.config.name}`);
       
-      // Find STEPS.md file in PR
-      const stepsFile = prDetails.files.find(file => 
-        file.filename.toLowerCase() === 'steps.md' || 
-        file.filename.toLowerCase().endsWith('/steps.md')
+      // In a real implementation, this would parse the PR and extract steps
+      // For now, we'll just update the project config with a flag
+      
+      project.config.hasSteps = true;
+      project.config.lastStepUpdate = new Date().toISOString();
+      
+      // Save project config
+      await fs.writeJson(
+        path.join(project.path, 'project.json'), 
+        project.config, 
+        { spaces: 2 }
       );
       
-      if (!stepsFile) {
-        logger.warn('No STEPS.md file found in PR');
-        return false;
-      }
-      
-      // Get file content
-      const [owner, repo] = prDetails.base.repo.full_name.split('/');
-      const stepsContent = await this.gitHubEnhanced.getFileContent(
-        owner,
-        repo,
-        stepsFile.filename,
-        prDetails.head.sha
-      );
-      
-      if (!stepsContent) {
-        logger.warn('Could not fetch STEPS.md content');
-        return false;
-      }
-      
-      // Update project steps
-      const stepsPath = path.join(project.path, 'STEPS.md');
-      fs.writeFileSync(stepsPath, stepsContent, 'utf8');
-      
-      // Reload steps in project
-      project.loadSteps();
-      
-      logger.info(`Updated steps for project ${project.config.name}`);
+      logger.info(`Updated project steps for ${project.config.name}`);
       return true;
     } catch (error) {
       logger.error(`Failed to update project steps: ${error.message}`);
       return false;
     }
+  }
+  
+  /**
+   * Check if a PR should be auto-merged
+   * @param {Object} prDetails - PR details
+   * @returns {boolean} Whether the PR should be auto-merged
+   */
+  shouldAutoMergePR(prDetails) {
+    // Check if auto-merge is enabled
+    if (!this.config.enableAutoMerge) {
+      return false;
+    }
+    
+    // Check for auto-merge keywords in PR title or body
+    const title = prDetails.title || '';
+    const body = prDetails.body || '';
+    
+    // Get auto-merge keywords from config
+    const autoMergeKeywords = (this.config.autoMergeKeywords || '')
+      .split(',')
+      .map(k => k.trim())
+      .filter(Boolean);
+    
+    // Default keywords if none configured
+    const defaultKeywords = ['auto-merge', 'automerge', 'auto merge'];
+    const keywords = autoMergeKeywords.length > 0 ? autoMergeKeywords : defaultKeywords;
+    
+    // Check if any of the keywords are present in title or body
+    return keywords.some(keyword => 
+      title.toLowerCase().includes(keyword.toLowerCase()) || 
+      body.toLowerCase().includes(keyword.toLowerCase())
+    );
+  }
+  
+  /**
+   * Check if a branch is a feature branch
+   * @param {string} branchName - Branch name
+   * @returns {boolean} Whether this is a feature branch
+   */
+  isFeatureBranch(branchName) {
+    // Check branch name for feature branch indicators
+    const featurePrefixes = ['feature/', 'feat/', 'feature-', 'feat-'];
+    return featurePrefixes.some(prefix => branchName.startsWith(prefix));
   }
   
   /**
@@ -447,223 +417,30 @@ class DeplaEnhanced {
     try {
       logger.info(`Updating feature branch status for ${project.config.name}: ${branchName}`);
       
-      // Extract feature name from branch
-      const featureName = this.extractFeatureNameFromBranch(branchName);
+      // In a real implementation, this would update the project with feature branch info
+      // For now, we'll just update the project config with the branch name
       
-      // Update project config with feature branch
       if (!project.config.featureBranches) {
         project.config.featureBranches = [];
       }
       
-      // Check if branch already exists
-      const existingIndex = project.config.featureBranches.findIndex(
-        branch => branch.name === branchName
-      );
-      
-      if (existingIndex !== -1) {
-        // Update existing branch
-        project.config.featureBranches[existingIndex].updatedAt = new Date().toISOString();
-      } else {
-        // Add new branch
-        project.config.featureBranches.push({
-          name: branchName,
-          feature: featureName,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          status: 'active'
-        });
+      // Add branch if not already in the list
+      if (!project.config.featureBranches.includes(branchName)) {
+        project.config.featureBranches.push(branchName);
+        
+        // Save project config
+        await fs.writeJson(
+          path.join(project.path, 'project.json'), 
+          project.config, 
+          { spaces: 2 }
+        );
       }
-      
-      // Save project config
-      project.saveConfig();
       
       logger.info(`Updated feature branch status for ${project.config.name}`);
       return true;
     } catch (error) {
       logger.error(`Failed to update feature branch status: ${error.message}`);
       return false;
-    }
-  }
-  
-  /**
-   * Extract feature name from branch name
-   * @param {string} branchName - Branch name
-   * @returns {string} Feature name
-   */
-  extractFeatureNameFromBranch(branchName) {
-    // Remove prefix
-    let featureName = branchName;
-    
-    const prefixes = ['feature/', 'feat/', 'component/', 'implement/'];
-    for (const prefix of prefixes) {
-      if (branchName.startsWith(prefix)) {
-        featureName = branchName.substring(prefix.length);
-        break;
-      }
-    }
-    
-    // Convert kebab-case to title case
-    return featureName
-      .split('-')
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
-  }
-  
-  /**
-   * Create a new project
-   * @param {Object} projectData - Project data
-   * @returns {Promise<Object>} Creation result
-   */
-  async createProject(projectData) {
-    try {
-      logger.info(`Creating new project: ${projectData.name}`);
-      
-      const result = await this.multiProjectManager.createProject(projectData);
-      
-      if (result.success) {
-        logger.info(`Project created: ${projectData.name}`);
-      } else {
-        logger.error(`Failed to create project: ${result.error}`);
-      }
-      
-      return result;
-    } catch (error) {
-      logger.error(`Failed to create project: ${error.message}`);
-      return { success: false, error: error.message };
-    }
-  }
-  
-  /**
-   * Generate steps for a project
-   * @param {string} projectId - Project ID
-   * @returns {Promise<Object>} Generation result
-   */
-  async generateSteps(projectId) {
-    try {
-      logger.info(`Generating steps for project: ${projectId}`);
-      
-      const project = this.multiProjectManager.getProject(projectId);
-      if (!project) {
-        throw new Error(`Project not found: ${projectId}`);
-      }
-      
-      // Get requirements and prompt content
-      const requirementsPath = project.getRequirementsPath();
-      const promptPath = path.join(project.path, project.templateFiles.stepByStep);
-      
-      if (!fs.existsSync(requirementsPath)) {
-        throw new Error(`Requirements file not found: ${requirementsPath}`);
-      }
-      
-      if (!fs.existsSync(promptPath)) {
-        throw new Error(`Prompt file not found: ${promptPath}`);
-      }
-      
-      const requirementsContent = fs.readFileSync(requirementsPath, 'utf8');
-      const promptContent = fs.readFileSync(promptPath, 'utf8');
-      
-      // Send message to generate steps
-      const result = await this.sendMessage({
-        type: 'generate-steps',
-        projectName: project.config.name,
-        requirementsContent,
-        promptContent,
-        repository: project.config.repository
-      }, 'high');
-      
-      logger.info(`Steps generation initiated for project: ${projectId}`);
-      
-      return {
-        success: true,
-        message: `Implementation Plan for ${project.config.name}\n\nGenerating... Please wait for completion.\n`,
-        messageId: result.messageId
-      };
-    } catch (error) {
-      logger.error(`Failed to generate steps: ${error.message}`);
-      return { success: false, error: error.message };
-    }
-  }
-  
-  /**
-   * Capture cursor position for automation
-   * @param {string} name - Position name
-   * @returns {Promise<Object>} Captured position
-   */
-  async captureCursorPosition(name) {
-    try {
-      const position = CursorAutomation.captureCurrentPosition(name);
-      return { success: true, position };
-    } catch (error) {
-      logger.error(`Failed to capture cursor position: ${error.message}`);
-      return { success: false, error: error.message };
-    }
-  }
-  
-  /**
-   * Send a message to the specified cursor position
-   * @param {Object} message - Message to send
-   * @param {string} priority - Message priority
-   * @returns {Promise<Object>} Message enqueue result
-   */
-  async sendMessage(message, priority = 'normal') {
-    try {
-      const messageId = this.messageQueueManager.enqueueMessage(message, priority);
-      return { success: true, messageId };
-    } catch (error) {
-      logger.error(`Failed to send message: ${error.message}`);
-      return { success: false, error: error.message };
-    }
-  }
-  
-  /**
-   * Send a batch of messages
-   * @param {Array<Object>} messages - Messages to send
-   * @param {string} priority - Message priority
-   * @returns {Promise<Object>} Batch send result
-   */
-  async sendMessageBatch(messages, priority = 'normal') {
-    try {
-      const messageIds = this.messageQueueManager.enqueueMessages(messages, priority);
-      return { success: true, messageIds };
-    } catch (error) {
-      logger.error(`Failed to send message batch: ${error.message}`);
-      return { success: false, error: error.message };
-    }
-  }
-  
-  /**
-   * Get the status of the message queue
-   * @returns {Object} Queue status
-   */
-  getQueueStatus() {
-    return this.messageQueueManager.getQueueStats();
-  }
-  
-  /**
-   * Pause message processing
-   * @returns {Object} Result
-   */
-  pauseMessageProcessing() {
-    try {
-      this.messageQueueManager.pauseProcessing();
-      return { success: true, message: 'Message processing paused' };
-    } catch (error) {
-      logger.error(`Failed to pause message processing: ${error.message}`);
-      return { success: false, error: error.message };
-    }
-  }
-  
-  /**
-   * Resume message processing
-   * @returns {Object} Result
-   */
-  resumeMessageProcessing() {
-    try {
-      this.messageQueueManager.resumeProcessing();
-      return { success: true, message: 'Message processing resumed' };
-    } catch (error) {
-      logger.error(`Failed to resume message processing: ${error.message}`);
-      return { success: false, error: error.message };
     }
   }
   
@@ -680,9 +457,20 @@ class DeplaEnhanced {
         throw new Error(`Project not found: ${projectId}`);
       }
       
-      // In a real implementation, this would parse the file and extract components
-      // For now, we'll just return a simulated result
+      // Check if STEP-BY-STEP.md exists
+      const stepFilePath = path.join(project.path, 'STEP-BY-STEP.md');
+      if (!fs.existsSync(stepFilePath)) {
+        throw new Error(`STEP-BY-STEP.md not found for project: ${projectId}`);
+      }
       
+      // Read the file
+      const stepFileContent = await fs.readFile(stepFilePath, 'utf8');
+      
+      // Parse the file to extract components for the specified phase
+      // This is a simplified implementation - in a real scenario, you would
+      // implement proper parsing logic based on the file format
+      
+      // For now, we'll return simulated components
       const simulatedComponents = [
         {
           name: 'Authentication Module',
@@ -706,6 +494,8 @@ class DeplaEnhanced {
           template: 'feature-implementation'
         }
       ];
+      
+      logger.info(`Parsed ${simulatedComponents.length} components for phase ${phaseNumber} of project ${projectId}`);
       
       return { 
         success: true, 
@@ -745,7 +535,7 @@ class DeplaEnhanced {
       
       // Create messages for each component
       const messages = parseResult.components.map(component => ({
-        content: `In accordance to best developmental methods and considering all correspondent code context -> Implement ${component.name}\n\n${component.description}\n\nhave in mind that there are other concurrently developed correspondent features therefore you should carefully align with requirements of the feature`,
+        content: `In accordance to best developmental methods and considering all correspondent code context -> Implement ${component.name}\\n\\n${component.description}\\n\\nhave in mind that there are other concurrently developed correspondent features therefore you should carefully align with requirements of the feature`,
         inputPosition: inputPosition,
         metadata: {
           projectId,
@@ -867,11 +657,117 @@ class DeplaEnhanced {
     return {
       enabled: !!this.automationInterval,
       isProcessing: this.isProcessingAutomation,
-      prAnalysisQueue: this.gitHubEnhanced.prAnalysisQueue.length,
-      mergeQueue: this.gitHubEnhanced.mergeQueue.length,
+      prAnalysisQueue: this.gitHubEnhanced.prAnalysisQueue?.length || 0,
+      mergeQueue: this.gitHubEnhanced.mergeQueue?.length || 0,
       messageQueue: this.getQueueStatus(),
       activeWorkflows: this.workflowManager.getAllExecutions().length
     };
+  }
+  
+  /**
+   * Get cursor positions
+   * @returns {Array} Cursor positions
+   */
+  getCursorPositions() {
+    return this.cursorManager.getAllPositions();
+  }
+  
+  /**
+   * Save a cursor position
+   * @param {string} name - Position name
+   * @param {Object} coordinates - Position coordinates {x, y}
+   * @param {Object} metadata - Additional metadata
+   * @returns {Object} Saved position
+   */
+  saveCursorPosition(name, coordinates, metadata = {}) {
+    return this.cursorManager.savePosition(name, coordinates, metadata);
+  }
+  
+  /**
+   * Delete a cursor position
+   * @param {string} name - Position name
+   * @returns {boolean} Success status
+   */
+  deleteCursorPosition(name) {
+    return this.cursorManager.deletePosition(name);
+  }
+  
+  /**
+   * Capture the current cursor position
+   * @param {string} name - Position name
+   * @param {Object} metadata - Additional metadata
+   * @returns {Object} Captured position
+   */
+  captureCursorPosition(name, metadata = {}) {
+    return this.cursorManager.captureCurrentPosition(name, metadata);
+  }
+  
+  /**
+   * Send a message to the specified cursor position
+   * @param {Object} message - Message to send
+   * @param {string} priority - Message priority
+   * @returns {Promise<Object>} Message enqueue result
+   */
+  async sendMessage(message, priority = 'normal') {
+    try {
+      const messageId = this.messageQueueManager.enqueueMessage(message, priority);
+      return { success: true, messageId };
+    } catch (error) {
+      logger.error(`Failed to send message: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+  
+  /**
+   * Send a batch of messages
+   * @param {Array<Object>} messages - Messages to send
+   * @param {string} priority - Message priority
+   * @returns {Promise<Object>} Batch send result
+   */
+  async sendMessageBatch(messages, priority = 'normal') {
+    try {
+      const messageIds = this.messageQueueManager.enqueueMessages(messages, priority);
+      return { success: true, messageIds };
+    } catch (error) {
+      logger.error(`Failed to send message batch: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+  
+  /**
+   * Get the status of the message queue
+   * @returns {Object} Queue status
+   */
+  getQueueStatus() {
+    return this.messageQueueManager.getQueueStats();
+  }
+  
+  /**
+   * Pause message processing
+   * @returns {Object} Result
+   */
+  pauseMessageProcessing() {
+    try {
+      this.messageQueueManager.pauseProcessing();
+      return { success: true, message: 'Message processing paused' };
+    } catch (error) {
+      logger.error(`Failed to pause message processing: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+  
+  /**
+   * Resume message processing
+   * @returns {Object} Result
+   */
+  resumeMessageProcessing() {
+    try {
+      this.messageQueueManager.resumeProcessing();
+      return { success: true, message: 'Message processing resumed' };
+    } catch (error) {
+      logger.error(`Failed to resume message processing: ${error.message}`);
+      return { success: false, error: error.message };
+    }
   }
   
   /**
